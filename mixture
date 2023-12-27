@@ -1,0 +1,244 @@
+#!/bin/bash
+set -xv
+source default_config
+if [ -z "$1" ];then
+	echo "Unknown operation. Type '$0 help' to get help."
+	exit 1
+fi
+if [[ -z "$2" ]];then
+	if [[ "$1" != "li" && "$1" != "la" && "$1" != "help" ]];then
+		echo "No package to operate on!"
+		exit 1
+	fi
+fi
+# Filesystem where all packages will be installed
+if [ -z "$ROOT" ];then
+	export ROOT="/"
+fi
+# /usr directory of this filesystem
+if [ -z "$USR" ];then
+	export USR="$ROOT/usr"
+fi
+# /var directory of this filesystem
+if [ -z "$VAR" ];then
+	export VAR="$ROOT/var"
+fi
+# Metadata with source tarballs
+# This is also a directory where packages will be built
+if [ -z "$SRC" ];then
+	export SRC="$USR/src/mixtures"
+fi
+# Metadata of installed packages
+if [ -z "$DATA" ];then
+	export DATA="$VAR/cache/mix/data"
+fi
+# Tarballs with available packages, ready for installation
+if [ -z "$PKG" ];then
+	export PKG="$VAR/cache/mix/pkgs"
+fi
+# Custom files for MIX
+if [ -z "$LI" ];then
+	export LI="$VAR/cache/mix/localindex"
+fi
+
+# Create some required files for mixture if they don't exist yet
+if [[ ! -f "$LI"/installed-list ]]; then
+	ad "$LI"
+	af "$LI/installed-list"
+fi
+
+
+if [[ "$ROOT" != /* || "$USR" != /* || "$VAR" != /* || "$SRC" != /* || "$DATA" != /* || "$PKG" != /* || "$LI" != /* ]];then
+	echo "Non-absolute paths found in configuration!"
+	exit 1
+fi
+
+ad "$ROOT" "$USR" "$VAR" "$SRC" "$PKG" "$LI" &> /dev/null
+
+chckerr() {
+	if [[ "$?" != 0 ]]
+	then
+		echo -en "Failed to build a package. \nPlease, see the log file: $MIXBLD/building.log\n"
+		exit 1
+	fi
+}
+
+if [[ "$1" == "bb" ]]; then
+		if [[ ! -d "$SRC/$2" ]];then
+			echo "Package with supplied name cannot be found!"
+			exit 1
+		else
+			export MIXBLD="$SRC/$2"
+			export MIXPKG="$PKG/$2.mix"
+			export MIXDATA="$DATA/$2/"
+		fi
+		echo ">> BUILDING: $2"
+		ad "$MIXBLD" &>> "$MIXBLD/building.log"
+		af "$MIXBLD/building.log" &>> "$MIXBLD/building.log"
+		cd "$MIXBLD" || exit 1
+		echo "Unpacking sources..." | tee -a "$MIXBLD/building.log"
+		bash "$MIXBLD"/magician unpack &>> "$MIXBLD/building.log"
+		chckerr
+		echo "Configuring sources..." | tee -a "$MIXBLD/building.log"
+		bash "$MIXBLD"/magician conf &>> "$MIXBLD/building.log"
+		chckerr
+		echo "Compiling sources..." | tee -a "$MIXBLD/building.log"
+		PROC="$(nproc)" bash "$MIXBLD"/magician comp &>> "$MIXBLD/building.log"
+		chckerr
+		echo "Installing sources..." | tee -a "$MIXBLD/building.log"
+		INSTALLTO="$MIXBLD/fs/" bash "$MIXBLD"/magician setup &>> "$MIXBLD/building.log"
+		chckerr
+		echo "Making a tarball..." | tee -a "$MIXBLD/building.log"
+		ad "$MIXDATA"
+		cd "$MIXBLD/fs/" || exit 1
+		tar -cJf "$MIXBLD/$2.mix" "."
+		chckerr
+		cd "$MIXBLD/fs/" || exit 1
+		filelist=$(tar -Jtf "$MIXBLD/$2.mix" | tail -n +2)
+		for file in $filelist ;do 
+			if [[ ! -d "$file" ]];then
+				echo "$(sha512sum "$file")" >> "$MIXDATA/files.mixdata"
+			fi
+		done
+		chckerr
+		cd "$MIXBLD" || exit 1
+		c "$MIXBLD/$2.mix" "$MIXPKG"
+		chckerr
+		c "$MIXBLD/metadata.mixdata" "$MIXDATA"
+		chckerr
+		# c "$MIXBLD/building.log" "$MIXPKG/building.log"
+		c "$MIXBLD/deps.mixdata" "$MIXDATA"
+		chckerr
+		echo "Cleaning up..." | tee -a "$MIXBLD/building.log"
+		rf "$MIXBLD/$2.mix"
+		rd -r "$MIXBLD/unpacked"
+		rd -r "$MIXBLD/fs"
+		rf "$MIXBLD/building.log"
+		echo "Ready package is available for installation at: \"$MIXPKG\""
+		echo "It's metadata files are stored in: \"$MIXDATA\""
+		echo "To install from local repository, use: \"mixture in $2\""
+elif [[ "$1" == "in" ]];then
+		export MIXBLD="$SRC/$2"
+		export MIXPKG="$PKG/$2.mix"
+		export MIXDATA="$DATA/$2/"
+		if [[ ! -f "$MIXPKG" ]];then
+			echo "Package with supplied name cannot be found!"
+			exit 1
+		fi
+		echo ">> INSTALLING: $2"
+		echo "Checking file collisions..."
+		# Check if package already exists
+		source "$MIXDATA/metadata.mixdata"
+		if grep "$2:$VERSION" "$LI/installed-list" -xq; then
+			echo "This package is already installed!"
+			exit 1
+		fi
+		# Check if file collides with another file from another package
+		while read p;do
+			e=0
+			pkg="$(echo "$p" | awk -F':' '{ print $1 }')"
+			if [[ "$pkg" != "$2" ]];then
+				while read f;do
+					filename="$(echo $f | awk -F'  ' '{ print $2 }')"
+					if [ -f "$ROOT/$filename" ];then
+						echo "File $ROOT/$filename is already reserved by a package \"$pkg\""
+						e=1
+					fi
+				done < "$DATA"/"$pkg"/files.mixdata
+			fi
+			if [[ "$e" != 0 ]];then
+				exit 1
+			fi
+		done < "$LI"/installed-list
+		echo "Extracting files..."
+		tar -xhJf "$MIXPKG" -C "$ROOT"
+		chckerr
+		echo "Diagnosing..."
+		while read f;do
+			for file in "$(echo "$f" | awk -F'  ' '{ print $2 }')"; do
+				if [[ ! -e "$ROOT/$file" ]];then
+					echo "File is missing: $ROOT/$file"
+				fi
+			done
+		done < "$MIXDATA"/files.mixdata
+		echo "$2:$VERSION" >> "$LI/installed-list"
+		if [[ "$(echo "$@" | grep -w "$2")" ]];then
+			echo "$2:$VERSION" >> "$LI/manually-installed-list"
+		fi
+elif [[ "$1" == "rm" ]];then
+		if "$0" vi "$2" &> /dev/null ;then
+			export MIXBLD="$SRC/$2"
+			export MIXPKG="$PKG/$2.mix"
+			export MIXDATA="$DATA/$2/"
+		else
+			echo "Package with supplied name cannot be found!"
+			exit 1
+		fi
+		echo ">> REMOVING: $2"
+		echo "Removing all files..."
+		while read f;do
+			for file in "$(echo "$f" | awk -F'  ' '{ print $2 }')"; do
+				file=$(echo "$f" | awk -F'  ' '{ print $2 }')
+				if [[ -f "$ROOT/$file" || -h "$ROOT/$file" ]];then
+					rf "$ROOT/$file"
+				elif [[ -d "$ROOT/$file" ]];then
+					rd "$ROOT/$file"
+				else
+					echo "Refusing to remove non-empty directory: $ROOT/$file"
+				fi
+				chckerr
+			done
+		done < "$MIXDATA"/files.mixdata
+		chckerr
+		sed "/$2/d" -i "$LI/installed-list"
+		sed "/$2/d" -i "$LI/manually-installed-list"
+elif [[ "$1" == "se" ]];then
+		echo ">> SEARCHING: $2"
+		for pkg in "$DATA"/*; do
+			source "$pkg"/metadata.mixdata
+			echo "$NAME ($VERSION) - $DESC" | grep "$2"
+		done
+elif [[ "$1" == "vi" ]];then
+		if [[ ! "$("$0" li "$2")" ]];then
+			echo "Package with supplied name could not be found!"
+			exit 1
+		else
+			export MIXBLD="$SRC/$2"
+			export MIXPKG="$PKG/$2.mix"
+			export MIXDATA="$DATA/$2/"
+		fi
+		if p "$LI/installed-list" | awk -F':' '{ print $1 }' |  grep -w "$2" ;then
+			echo "OK"
+			exit 0
+		else
+			echo "NOTOK"
+			exit 1
+		fi
+elif [[ "$1" == "li" ]];then
+		if [[ -n "$2" && "$(p "$LI"/installed-list | grep -x "$2")" ]] ; then
+			echo "OK"
+			exit 0
+		elif [[ -n "$2" && ! "$(p "$LI"/installed-list | grep -x "$2")" ]] ; then
+			echo "FALSE"
+			exit 1
+		else
+			p "$LI/installed-list"
+		fi
+elif [[ "$1" == "la" ]];then
+		l "$PKG"
+elif [[ "$1" == "help" ]];then
+echo -ne "MIXTURE - A package builder and deployer for CarrotOS
+
+It supports the following operations:
+bb	Build a package from source
+in	Install a package from tarball
+rm	Uninstall a package from system
+se	Look for a package definition in repos
+la	List packages in repositories
+li	List installed packages
+vi	Verify if package is installed
+"
+else
+		echo "Unknown operation. Type '$0 help' to get help."
+		exit 1
+fi
