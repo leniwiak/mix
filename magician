@@ -1,9 +1,14 @@
 #!/bin/bash
 export A="$1"
+source "./metadata.mixdata"
 
 # !!!
 # DO NOT MODIFY! THIS IS A DEFAULT EXAMPLE OF MAGICIAN SCRIPT
 # !!!
+
+get() {
+	wget -c "http://example.com/$NAME-$VERSION.tar.xz" "$NAME-$VERSION.tar.xz"
+}
 
 unpack() {
 	# Here we will unpack tarball with source
@@ -45,6 +50,8 @@ setup() {
 }
 
 case "$A" in
+	"get")
+		get;;
 	"unpack")
 		unpack;;
 	"conf")

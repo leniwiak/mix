@@ -1,5 +1,5 @@
 #!/bin/bash
-set -xv
+#set -xv
 source default_config
 if [ -z "$1" ];then
 	echo "Unknown operation. Type '$0 help' to get help."
@@ -73,9 +73,16 @@ if [[ "$1" == "bb" ]]; then
 			export MIXDATA="$DATA/$2/"
 		fi
 		echo ">> BUILDING: $2"
+		if [[ -f "$MIXBLD/building.log" ]];then rf "$MIXBLD/building.log"; fi
 		ad "$MIXBLD" &>> "$MIXBLD/building.log"
 		af "$MIXBLD/building.log" &>> "$MIXBLD/building.log"
 		cd "$MIXBLD" || exit 1
+		if [[ -f "$MIXBLD/fs" ]];then rd -r "$MIXBLD/fs"; fi
+		if [[ -f "$MIXBLD/unpacked" ]];then rd -r "$MIXBLD/unpacked"; fi
+		if [[ -f "$MIXBLD/$2.mix" ]];then rf "$MIXBLD/$2.mix"; fi
+		if [[ -f "$MIXBLD/files.mixdata" ]];then rf "$MIXBLD/files.mixdata"; fi
+		echo "Getting sources..." | tee -a "$MIXBLD/building.log"
+		bash "$MIXBLD"/magician get &>> "$MIXBLD/building.log"
 		echo "Unpacking sources..." | tee -a "$MIXBLD/building.log"
 		bash "$MIXBLD"/magician unpack &>> "$MIXBLD/building.log"
 		chckerr
@@ -97,20 +104,24 @@ if [[ "$1" == "bb" ]]; then
 		filelist=$(tar -Jtf "$MIXBLD/$2.mix" | tail -n +2)
 		for file in $filelist ;do 
 			if [[ ! -d "$file" ]];then
-				echo "$(sha512sum "$file")" >> "$MIXDATA/files.mixdata"
+				echo "$(sha512sum "$file")" >> "$MIXBLD/files.mixdata"
 			fi
 		done
 		chckerr
 		cd "$MIXBLD" || exit 1
-		c "$MIXBLD/$2.mix" "$MIXPKG"
+		c -o "$MIXBLD/$2.mix" "$MIXPKG"
 		chckerr
-		c "$MIXBLD/metadata.mixdata" "$MIXDATA"
+		c -o "$MIXBLD/files.mixdata" "$MIXDATA"
 		chckerr
-		# c "$MIXBLD/building.log" "$MIXPKG/building.log"
-		c "$MIXBLD/deps.mixdata" "$MIXDATA"
+		c -o "$MIXBLD/metadata.mixdata" "$MIXDATA"
+		chckerr
+		# c -o "$MIXBLD/building.log" "$MIXPKG/building.log"
+		c -o "$MIXBLD/deps.mixdata" "$MIXDATA"
 		chckerr
 		echo "Cleaning up..." | tee -a "$MIXBLD/building.log"
 		rf "$MIXBLD/$2.mix"
+		rf "$MIXBLD/files.mixdata"
+		rf "$MIXBLD/"*tar*
 		rd -r "$MIXBLD/unpacked"
 		rd -r "$MIXBLD/fs"
 		rf "$MIXBLD/building.log"
