@@ -1,0 +1,143 @@
+#!/bin/bash
+#set -xv
+source default_config
+source default_repo
+if [ -f "/etc/mixture.conf" ];then
+    source "/etc/mixture.conf"
+fi
+if [ -f "/etc/mix.conf" ];then
+    source "/etc/mix.conf"
+fi
+if [ -f "/etc/mix-repos.conf" ];then
+    source "/etc/mix-repos.conf"
+fi
+
+if [ -z "$1" ];then
+	echo "Unknown operation. Type '$0 help' to get help."
+	exit 1
+fi
+if [[ -z "$2" ]];then
+	if [[ "$1" != "help" ]];then
+		echo "No package to operate on!"
+		exit 1
+	fi
+fi
+# Settings from "mixture"
+if [ -z "$ROOT" ];then
+	export ROOT="/"
+fi
+if [ -z "$USR" ];then
+	export USR="$ROOT/usr"
+fi
+if [ -z "$VAR" ];then
+	export VAR="$ROOT/var"
+fi
+if [ -z "$SRC" ];then
+	export SRC="$USR/src/mixtures"
+fi
+if [ -z "$DATA" ];then
+	export DATA="$VAR/cache/mix/data"
+fi
+if [ -z "$PKG" ];then
+	export PKG="$VAR/cache/mix/pkgs"
+fi
+if [ -z "$LI" ];then
+	export LI="$VAR/cache/mix/localindex"
+fi
+
+# Define colors
+WHI="\e[1;37m"
+RED="\e[1;31m"
+GRN="\e[1;32m"
+YLW="\e[1;33m"
+BLU="\e[1;34m"
+NC="\e[0m"
+
+# Create some required files for mixture if they don't exist yet
+if [[ ! -f "$LI"/installed-list ]]; then
+	ad "$LI"
+	af "$LI/installed-list"
+fi
+if [[ "$ROOT" != /* || "$USR" != /* || "$VAR" != /* || "$SRC" != /* || "$DATA" != /* || "$PKG" != /* || "$LI" != /* ]];then
+	echo "Non-absolute paths found in configuration!"
+	exit 1
+fi
+
+# Choose if you want to compile or just install stuff
+if [ -z "$PREFER_BUILD" ];then
+	export PREFER_BUILD=false
+fi
+
+ad "$ROOT" "$USR" "$VAR" "$SRC" "$PKG" "$LI" &> /dev/null
+
+chckerr() {
+	if [[ "$?" != 0 ]]
+	then
+		echo -en "Failed to build a package. \nPlease, see the log file: $MIXBLD/building.log\n"
+		exit 1
+	fi
+}
+
+echo -e "${GNR}>>> ${WHI}$2${NC}"
+if [[ "$1" == "install" ]]; then
+	echo -e "- PREPARING"
+    for PKG in "${@:2}"
+    do
+        echo "$PKG"
+        if [[ ! -d "$SRC/$PKG" ]];then
+			echo "Package with supplied name cannot be found!"
+			exit 1
+		else
+			export MIXBLD="$SRC/$PKG"
+			export MIXPKG="$PKG/$PKG.mix"
+			export MIXDATA="$DATA/$PKG/"
+		fi
+		echo -e "  Resolving dependencies for $PKG..." | tee -a "$MIXBLD/building.log"
+        source "$MIXDATA/deps.mixdata"
+        for DEPENDENCY in "${COMPILE[@]}"
+        do
+            echo "$DEPENDENCY"
+        done
+    done
+    for PKG in "${@:2}"
+    do
+        echo "$PKG"
+        if [[ ! -d "$SRC/$PKG" ]];then
+			echo "Package with supplied name cannot be found!"
+			exit 1
+		else
+			export MIXBLD="$SRC/$PKG"
+			export MIXPKG="$PKG/$PKG.mix"
+			export MIXDATA="$DATA/$PKG/"
+		fi
+		echo -e "- INSTALLING: $PKG"
+		echo -e "  Build directory:    $MIXBLD"
+		echo -e "  Ready package path: $MIXPKG"
+		echo -e "  Metadata directory: $MIXDATA"
+		echo -e ""
+		echo -e "  Checking dependency tree..." | tee -a "$MIXBLD/building.log"
+        source "$MIXDATA/deps.mixdata"
+
+    done
+elif [[ "$1" == "remove" ]]; then
+	echo -e ">> TODO!"
+elif [[ "$1" == "update" ]]; then
+	echo -e ">> TODO!"
+elif [[ "$1" == "search" ]]; then
+	echo -e ">> TODO!"
+elif [[ "$1" == "sync" ]]; then
+	echo -e ">> TODO!"
+elif [[ "$1" == "help" ]];then
+echo -ne "MIXTURE - A package builder and deployer for the Carrot system
+
+It supports the following operations:
+install        Add a feature to system
+remove         Remove a feature from system
+update         Update all or some packages
+search         Find a package in repositories
+sync           Syncronize software repositories
+"
+else
+		echo "Unknown operation. Type '$0 help' to get help."
+		exit 1
+fi
