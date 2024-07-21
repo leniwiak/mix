@@ -1,15 +1,13 @@
 #!/bin/bash
 #set -xv
-source default_config
+source debug_config
 source default_repo
-if [ -f "/etc/mixture.conf" ];then
-    source "/etc/mixture.conf"
+
+if [ -f "/etc/mix/mix.conf" ];then
+    source "/etc/mix/mix.conf"
 fi
-if [ -f "/etc/mix.conf" ];then
-    source "/etc/mix.conf"
-fi
-if [ -f "/etc/mix-repos.conf" ];then
-    source "/etc/mix-repos.conf"
+if [ -f "/etc/mix/repos.conf" ];then
+    source "/etc/mix/repos.conf"
 fi
 
 if [ -z "$1" ];then
@@ -22,7 +20,9 @@ if [[ -z "$2" ]];then
 		exit 1
 	fi
 fi
-# Settings from "mixture"
+
+# Settings from "mix.conf"
+# Some basic directories
 if [ -z "$ROOT" ];then
 	export ROOT="/"
 fi
@@ -32,17 +32,13 @@ fi
 if [ -z "$VAR" ];then
 	export VAR="$ROOT/var"
 fi
-if [ -z "$SRC" ];then
-	export SRC="$USR/src/mixtures"
+# This is where repositories are being saved locally
+if [ -z "$LOCAL_REPO" ];then
+	export PKG="$VAR/cache/mix/local_repo"
 fi
-if [ -z "$DATA" ];then
-	export DATA="$VAR/cache/mix/data"
-fi
-if [ -z "$PKG" ];then
-	export PKG="$VAR/cache/mix/pkgs"
-fi
-if [ -z "$LI" ];then
-	export LI="$VAR/cache/mix/localindex"
+# This is where system status is saved
+if [ -z "$STATUS" ];then
+	export DATA="$VAR/cache/mix/status"
 fi
 
 # Define colors
@@ -54,71 +50,82 @@ BLU="\e[1;34m"
 NC="\e[0m"
 
 # Create some required files for mixture if they don't exist yet
-if [[ ! -f "$LI"/installed-list ]]; then
-	ad "$LI"
+if [[ ! -f "$STATUS"/installed-list ]]; then
+	ad -i -p "$LI"
 	af "$LI/installed-list"
 fi
-if [[ "$ROOT" != /* || "$USR" != /* || "$VAR" != /* || "$SRC" != /* || "$DATA" != /* || "$PKG" != /* || "$LI" != /* ]];then
+if [[ ! -f "$STATUS"/installed-manually-list ]]; then
+	ad -i -p "$LI"
+	af "$LI/installed-manually-list"
+fi
+if [[ "$ROOT" != /* || "$USR" != /* || "$VAR" != /* || "$LOCAL_REPO" != /* || "$STATUS" != /* ]];then
 	echo "Non-absolute paths found in configuration!"
 	exit 1
 fi
 
-# Choose if you want to compile or just install stuff
-if [ -z "$PREFER_BUILD" ];then
-	export PREFER_BUILD=false
-fi
+ad -i "$ROOT" "$USR" "$VAR" "$SRC" "$LOCAL_REPO" "$STATUS"
 
-ad "$ROOT" "$USR" "$VAR" "$SRC" "$PKG" "$LI" &> /dev/null
-
-chckerr() {
-	if [[ "$?" != 0 ]]
+CHECKERR() {
+	if [[ $1 != 0 ]]
 	then
-		echo -en "Failed to build a package. \nPlease, see the log file: $MIXBLD/building.log\n"
+		echo -en "${RED}Installation unexpectedly failed!${NC}\nReport this issue to the package maintainer!\n"
 		exit 1
 	fi
 }
 
-echo -e "${GNR}>>> ${WHI}$2${NC}"
 if [[ "$1" == "install" ]]; then
-	echo -e "- PREPARING"
-    for PKG in "${@:2}"
-    do
-        echo "$PKG"
-        if [[ ! -d "$SRC/$PKG" ]];then
-			echo "Package with supplied name cannot be found!"
+	# Check existance of all packages requested by user
+	for PKG in "${@:2}"; do
+		echo "- Checking existence: $PKG"
+		if [[ ! -d "$LOCAL_REPO/$PKG" ]];then
+			echo "$PKG: Package could not be found!"
 			exit 1
-		else
-			export MIXBLD="$SRC/$PKG"
-			export MIXPKG="$PKG/$PKG.mix"
-			export MIXDATA="$DATA/$PKG/"
 		fi
-		echo -e "  Resolving dependencies for $PKG..." | tee -a "$MIXBLD/building.log"
-        source "$MIXDATA/deps.mixdata"
-        for DEPENDENCY in "${COMPILE[@]}"
-        do
-            echo "$DEPENDENCY"
-        done
-    done
-    for PKG in "${@:2}"
-    do
-        echo "$PKG"
-        if [[ ! -d "$SRC/$PKG" ]];then
-			echo "Package with supplied name cannot be found!"
-			exit 1
-		else
-			export MIXBLD="$SRC/$PKG"
-			export MIXPKG="$PKG/$PKG.mix"
-			export MIXDATA="$DATA/$PKG/"
-		fi
-		echo -e "- INSTALLING: $PKG"
-		echo -e "  Build directory:    $MIXBLD"
-		echo -e "  Ready package path: $MIXPKG"
-		echo -e "  Metadata directory: $MIXDATA"
-		echo -e ""
-		echo -e "  Checking dependency tree..." | tee -a "$MIXBLD/building.log"
-        source "$MIXDATA/deps.mixdata"
+	done
+	# Check dependencies
+	for PKG in "${@:2}"; do
+		echo "- Checking dependencies: $PKG"
+		source "$LOCAL_REPO/$PKG/mixture"
+		for DEP in ${RUNTIME_DEPS} ; do
+			echo "NOTICE: Package $PKG depends on $DEP"
+		done
+	done
+	echo "Abort!"			
+	exit 0
 
-    done
+	echo "- Cheking intergrity..."
+	cd "$PKG" || exit 1
+	sha512sum -c "$2".mix.sha512 --status
+	CHECKERR $?
+	echo "- Unpacking .mix package..."
+	ad -p "$MIXPKG"
+	tar -xhf "$PKG/$2.mix" -C "$MIXPKG"
+	chckerr
+	cd "$MIXPKG" || exit 1
+	echo "- Checking file collisions..."
+	# Check if package already exists
+	source "./metadata.mixdata"
+	if grep "$2:$VERSION" "$LI/installed-list" -xq; then
+		echo "This package is already installed!"
+		exit 1
+	fi
+	# Check if file collides with another file from another package
+	while read -r f; do
+		e=0
+		if [ -f "$ROOT/$f" ];then
+			while read -r p;do
+				pkg="$(echo "$p" | awk -F':' '{ print $1 }')"
+				if [[ "$pkg" != "$2" ]]; then
+					while read -r f;do
+						filename="$(echo "$f" | awk -F'  ' '{ print $2 }')"
+						echo "File $ROOT/$filename is already reserved by a package \"$pkg\""
+						e=1
+					done < "$DATA"/"$2"/filelist.mixdata
+				fi
+			done < "$LI"/installed-list
+		fi
+		if [[ "$e" != 0 ]];then
+			exit 1
 elif [[ "$1" == "remove" ]]; then
 	echo -e ">> TODO!"
 elif [[ "$1" == "update" ]]; then

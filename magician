@@ -1,67 +1,200 @@
 #!/bin/bash
-export A="$1"
-source "./metadata.mixdata"
+#set -xv
 
-# !!!
-# DO NOT MODIFY! THIS IS A DEFAULT EXAMPLE OF MAGICIAN SCRIPT
-# !!!
+#source debug_repo
 
-get() {
-	wget -c "http://example.com/$NAME-$VERSION.tar.xz" "$NAME-$VERSION.tar.xz"
-}
+if [ -f "/etc/mixture.conf" ];then
+    source "/etc/mixture.conf"
+fi
 
-unpack() {
-	# Here we will unpack tarball with source
-	ad unpacked
-	tar -xvf ./*tar* -C unpacked
-	exit "$?"
-	echo "Contents of 'unpacked'"
-	l unpacked
-}
-conf() {
-	# This is were package source should be configured
-	cd unpacked
-	cd *
-	# ./autogen.sh
-	./configure --prefix="/usr"
-	exitcode="$?"
-	if [[ "$exitcode" != 0 ]];then exit "$exitcode";fi
-	cd ..
-	exit "$?"
-}
-comp() {
-	# This function builds a package
-	cd unpacked
-	cd *
-	make -j"$PROC"
-	exitcode="$?"
-	if [[ "$exitcode" != 0 ]];then exit "$exitcode";fi
-	cd ..
-	exit "$?"
-}
-setup() {
-	# Here we're going to install a package to local database and set up some things (if needed)
-	cd unpacked
-	cd *
-	make DESTDIR="$INSTALLTO" install
-	exitcode="$?"
-	if [[ "$exitcode" != 0 ]];then exit "$exitcode";fi
-	cd ..
-}
+if [[ "$1" != "help" && "$1" != "build" && "$1" != "package" && "$1" != "rm-build" && "$1" != "rm-download" ]];then
+	echo "Unknown operation. Type '$0 help' to get help."
+	exit 1
+fi
 
-case "$A" in
-	"get")
-		get;;
-	"unpack")
-		unpack;;
-	"conf")
-		conf;;
-	"comp")
-		comp;;
-	"setup")
-		setup;;
-	*)
-		echo "Unknown operation."
+# Define colors
+WHI="\e[1;37m"
+RED="\e[1;31m"
+GRN="\e[1;32m"
+YLW="\e[1;33m"
+BLU="\e[1;34m"
+NC="\e[0m"
+
+CHECKERR() {
+	if [[ $? != 0 ]]
+	then
+		echo -en "Failed to process a package. \nPlease, see the log file: $LOG_FILE \n"
 		exit 1
-		;;
-esac
+	fi
+}
+
+if [[ ! -e "./mixture" ]];then
+	echo "Missing mixture file! Can't continue!"
+	exit 1
+fi
+
+if [[ "$1" == "build" ]]; then
+		export PKG_NAME=`basename $PWD`
+		export PACKAGE_DIR="$PWD"
+		export LOG_DIR="$PWD/LOG"
+		export LOG_FILE="$LOG_DIR/building.mixlog"
+		export BUILD_DIR="$PWD/BUILD"
+		export OUTPUT_DIR="$PWD/OUTPUT"
+		export DOWNLOAD_DIR="$PWD/DOWNLOAD"
+
+		echo -e "${BLU}- BUILDING ${NC}"
+		echo -ne "${WHI}"
+		echo -e "Logging file:         $LOG_FILE"
+		echo -e "Build directory:      $BUILD_DIR"
+		echo -e "Download directory:   $DOWNLOAD_DIR"
+		echo -e "Output fs location:   $OUTPUT_DIR"
+		echo -ne "${NC}"
+		echo -e ""
+
+		# Recreate building log
+		if [[ -e "$LOG_FILE" || -e "$LOG_DIR" ]];then rd -r "$LOG_DIR"; fi
+		ad -p "$LOG_DIR"
+		af "$LOG_FILE"
+
+		# Create or recreate directories
+		if [[ -e "$OUTPUT_DIR" ]];then rd -r "$OUTPUT_DIR"; fi
+		ad -p "$OUTPUT_DIR"
+		if [[ -e "$DOWNLOAD_DIR/unpacked" ]];then rd -r "$DOWNLOAD_DIR/unpacked"; fi
+		ad -p "$DOWNLOAD_DIR/unpacked"
+		
+		# Remove files from previous build
+		if [[ -f "$PACKAGE_DIR/$PKG_NAME.mix" ]];then rf "$PACKAGE_DIR/$PKG_NAME.mix"; fi
+		if [[ -f "$PACKAGE_DIR/$PKG_NAME-files.mixdata" ]];then rf "$PACKAGE_DIR/$PKG_NAME-files.mixdata"; fi
+
+		# Source variables from the mixture script
+		echo -e "- Sourcing the mixture file..." | tee -a "$LOG_FILE"
+		source "$PACKAGE_DIR/mixture" "none"
+
+		# Download files listed in mixture to the DOWNLOAD directory
+		echo -e "- Downloading sources..." | tee -a "$LOG_FILE"
+		cd "$DOWNLOAD_DIR" || exit 1
+		index=1
+		for res in "${DOWNLOAD[@]}"; do
+			curl -C - "$res" -Lo "$index-$NAME-$VERSION" | tee -a "$LOG_FILE"
+			#wget -c "$res" -O "$index-$NAME-$VERSION"
+			CHECKERR $?
+			index=$((++index))
+		done
+
+		# Unpack files in DOWNLOAD/unpacked
+		echo -e "- Unpacking sources..." | tee -a "$LOG_FILE"
+		ad -p "$DOWNLOAD_DIR/unpacked" | tee -a "$LOG_FILE"
+		index=1
+		continueloop=true
+		while [[ $continueloop == true ]];do
+			if [[ -f "$index-$NAME-$VERSION" ]]; then
+				tar -xhvf "$index-$NAME-$VERSION" -C "$DOWNLOAD_DIR/unpacked" | tee -a "$LOG_FILE"
+				CHECKERR $?
+			else
+				continueloop=false
+			fi
+			index=$((++index))
+		done
+
+		# Build from source
+		cd "$DOWNLOAD_DIR/unpacked/" || exit 1
+		cd * || exit 1
+
+		echo -e "- Configuring sources..." | tee -a "$LOG_FILE"
+		bash "$PACKAGE_DIR"/mixture conf | tee -a "$LOG_FILE"
+		CHECKERR $?
+		echo -e "- Compiling sources..." | tee -a "$LOG_FILE"
+		PROC="$(nproc)" CFLAGS="$CFLAGS" CXXFLAGS="CXXFLAGS"  bash "$PACKAGE_DIR"/mixture comp | tee -a "$LOG_FILE"
+		CHECKERR $?
+		echo -e "- Installing sources into temproot..." | tee -a "$LOG_FILE"
+		INSTALLTO="$OUTPUT_DIR" bash "$PACKAGE_DIR"/mixture setup | tee -a "$LOG_FILE"
+		CHECKERR $?
+
+		echo -e "${GRN}PACKAGE BUILT SUCCESSFULLY!${NC}"
+		echo "To remove unnecessary build directory, run 'mixture rm-build'"
+		echo "To remove unnecessary download directory, run 'mixture rm-download'"
+		echo "To make a package, run 'mixture package'"
+
+elif [[ "$1" == "package" ]]; then
+		export PKG_NAME=`basename $PWD`
+		export PACKAGE_DIR="$PWD"
+		export LOG_DIR="$PWD/LOG"
+		export LOG_FILE="$LOG_DIR/packaging.mixlog"
+		export BUILD_DIR="$PWD/BUILD"
+		export OUTPUT_DIR="$PWD/OUTPUT"
+		export DOWNLOAD_DIR="$PWD/DOWNLOAD"
+
+		echo -e "${BLU}- PACKAGING ${NC}"
+		echo -ne "${WHI}"
+		echo -e "Logging file:         $LOG_FILE"
+		echo -e "Build directory:      $BUILD_DIR"
+		echo -e "Download directory:   $DOWNLOAD_DIR"
+		echo -e "Output fs location:   $OUTPUT_DIR"
+		echo -ne "${NC}"
+
+		# Source variables from mixture file
+		echo -e "- Sourcing the mixture file..." | tee -a "$LOG_FILE"
+		source "$PACKAGE_DIR/mixture" "none"
+
+		# Make a proper installation package
+		echo -e "  Making a tarball..." | tee -a "$LOG_FILE"
+		cd "$OUTPUT_DIR/" || exit 1
+		tar -cJvf "$PACKAGE_DIR/$PKG_NAME.mix" "." | tee -a "$LOG_FILE"
+		CHECKERR $?
+		filelist=$(tar -Jtf "$PACKAGE_DIR/$PKG_NAME.mix" | tail -n +2)
+		for file in $filelist ;do 
+			if [[ ! -d "$file" ]];then
+				sha512sum "$file" >> "$PACKAGE_DIR/$PKG_NAME-files.mixdata"
+			fi
+		done
+		CHECKERR $?
+
+		cd "$PACKAGE_DIR" || exit 1
+		sha512sum "$PKG_NAME.mix" > "$PKG_NAME.mix.sha512"
+		CHECKERR $?
+		echo -e "${GRN}PACKAGE CREATED SUCCESSFULLY!${NC}"
+		echo "To remove unnecessary build directory, run 'mixture rm-build'"
+		echo "To remove unnecessary download directory, run 'mixture rm-download'"
+		echo "To remove unnecessary package filesystem, run 'mixture rm-output'"
+		echo "To install it into root, use program 'mix'"
+
+elif [[ "$1" == "rm-build" ]];then
+		export PKG_NAME=`basename $PWD`
+		export PACKAGE_DIR="$PWD"
+		export LOG_DIR="$PWD/LOG"
+		export LOG_FILE="$LOG_DIR/building.mixlog"
+		export BUILD_DIR="$PWD/BUILD"
+		export OUTPUT_DIR="$PWD/OUTPUT"
+		export DOWNLOAD_DIR="$PWD/DOWNLOAD"
+
+		echo -e "${WHI}- CLEANING UP ${NC}"
+		rd -r "$BUILD_DIR"
+		rf "$LOG_FILE"
+
+elif [[ "$1" == "rm-download" ]];then
+		export PKG_NAME=`basename $PWD`
+		export PACKAGE_DIR="$PWD"
+		export LOG_DIR="$PWD/LOG"
+		export LOG_FILE="$LOG_DIR/building.mixlog"
+		export BUILD_DIR="$PWD/BUILD"
+		export OUTPUT_DIR="$PWD/OUTPUT"
+		export DOWNLOAD_DIR="$PWD/DOWNLOAD"
+
+		echo -e "${WHI}- CLEANING UP ${NC}"
+		rd -r "$DOWLOAD_DIR"
+
+elif [[ "$1" == "rm-output" ]];then
+		export PKG_NAME=`basename $PWD`
+		export PACKAGE_DIR="$PWD"
+		export LOG_DIR="$PWD/LOG"
+		export LOG_FILE="$LOG_DIR/packaging.mixlog"
+		export BUILD_DIR="$PWD/BUILD"
+		export OUTPUT_DIR="$PWD/OUTPUT"
+		export DOWNLOAD_DIR="$PWD/DOWNLOAD"
+
+		echo -e "${WHI}- CLEANING UP ${NC}"
+		rf "$LOG_FILE"
+		rd -r "$OUTPUT_DIR"
+		rf "$PACKAGE_DIR/$PKG_NAME.mix"
+		rf "$PACKAGE_DIR/$PKG_NAME-files.mixdata"
+fi
